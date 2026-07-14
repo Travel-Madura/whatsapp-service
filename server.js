@@ -1,3 +1,36 @@
+// ═══════════════════════════════════
+// POLYFILL: crypto untuk Node.js 18/20
+// ═══════════════════════════════════
+const crypto = require('crypto');
+
+// Patch global crypto jika belum ada
+if (!globalThis.crypto) {
+    globalThis.crypto = {
+        getRandomValues: (buffer) => {
+            return crypto.randomFillSync(buffer);
+        },
+        randomUUID: () => {
+            return crypto.randomUUID();
+        },
+        subtle: {
+            digest: async (algorithm, buffer) => {
+                const hash = crypto.createHash(algorithm.replace('-', '').toLowerCase());
+                hash.update(Buffer.from(buffer));
+                return hash.digest();
+            },
+            importKey: async (format, keyData, algorithm, extractable, keyUsages) => {
+                return crypto.createSecretKey(keyData);
+            },
+            deriveBits: async (algorithm, baseKey, length) => {
+                // HKDF derivation
+                const { createHmac } = require('crypto');
+                const hmac = createHmac('sha256', baseKey);
+                return hmac.digest();
+            }
+        }
+    };
+}
+
 const express = require('express');
 const dotenv = require('dotenv');
 const fs = require('fs');
