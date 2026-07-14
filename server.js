@@ -208,13 +208,32 @@ async function connectWA() {
         const { connection, lastDisconnect, qr } = update;
         
         if (qr) {
+            // Clear console & tampilkan QR
+            console.clear();
             console.log('');
-            console.log('┌─────────────────────────────────────────────┐');
-            console.log('│  📱 SCAN QR CODE BELOW WITH WHATSAPP        │');
-            console.log('│  WhatsApp → Linked Devices → Link a Device  │');
-            console.log('└─────────────────────────────────────────────┘');
+            console.log('╔══════════════════════════════════════════════════╗');
+            console.log('║          📱 SCAN QR CODE TO CONNECT              ║');
+            console.log('╠══════════════════════════════════════════════════╣');
+            console.log('║                                                  ║');
+            console.log('║  1. Buka WhatsApp di HP                          ║');
+            console.log('║  2. Settings → Linked Devices → Link a Device    ║');
+            console.log('║  3. Scan QR di bawah ini                         ║');
+            console.log('║                                                  ║');
+            console.log('╚══════════════════════════════════════════════════╝');
             console.log('');
+            
+            // QR Code ASCII (lebih kecil)
             qrcode.generate(qr, { small: true });
+            
+            // URL QR Code (copy-paste ke browser)
+            const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=' + encodeURIComponent(qr);
+            console.log('');
+            console.log('🔗 QR CODE URL (Buka di browser untuk QR lebih jelas):');
+            console.log('   ' + qrUrl);
+            console.log('');
+            console.log('📋 Atau copy-paste ini ke WhatsApp Web:');
+            console.log('   ' + qr);
+            console.log('');
         }
         
         if (connection === 'close') {
