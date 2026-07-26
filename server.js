@@ -53,22 +53,28 @@ const app = express();
 app.use(express.json());
 
 // ═══════════════════════════════════
-// CONFIG
+// CONFIG - SEMUA DARI .ENV
 // ═══════════════════════════════════
 const CONFIG = {
     PORT: process.env.PORT || 3001,
     API_KEY: process.env.API_KEY || 'gomad-baileys-secret-key-2024',
     AUTH_DIR: process.env.AUTH_DIR || './auth_info',
+    PHONE_NUMBER: process.env.PHONE_NUMBER || '6285138094643',
 
+    // Anti-Banned Settings
     MIN_DELAY: parseInt(process.env.MIN_DELAY) || 15000,
     MAX_DELAY: parseInt(process.env.MAX_DELAY) || 35000,
     MAX_PER_HOUR: parseInt(process.env.MAX_PER_HOUR) || 10,
     MAX_PER_DAY: parseInt(process.env.MAX_PER_DAY) || 50,
-    OPERATING_START: parseInt(process.env.OPERATING_START) || 0,  // 0 = 24 jam
-    OPERATING_END: parseInt(process.env.OPERATING_END) || 24,     // 24 = 24 jam
-    RETRY_DELAY: 60000,
-    MAX_RETRIES: 3,
-    PHONE_NUMBER: process.env.PHONE_NUMBER || '6285138094643',
+    
+    // Jam Operasional (default 24 jam)
+    OPERATING_START: parseInt(process.env.OPERATING_START) || 0,
+    OPERATING_END: parseInt(process.env.OPERATING_END) || 24,
+    
+    RETRY_DELAY: parseInt(process.env.RETRY_DELAY) || 60000,
+    MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
+    
+    LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 };
 
 // ═══════════════════════════════════
@@ -79,7 +85,7 @@ const logger = pino({
         target: 'pino-pretty',
         options: { colorize: true }
     },
-    level: process.env.LOG_LEVEL || 'info',
+    level: CONFIG.LOG_LEVEL,
 });
 
 // ═══════════════════════════════════
@@ -92,6 +98,8 @@ let todayDate = new Date().toDateString();
 let totalSent = 0;
 let lastSentTime = null;
 let sock = null;
+let state = null;
+let pairingCodeAttempted = false;
 
 function resetDaily() {
     const today = new Date().toDateString();
@@ -107,16 +115,21 @@ function randomDelay() {
 }
 
 function isOperatingHours() {
-    // NONAKTIFKAN JAM OPERASIONAL - AKTIF 24 JAM
-    return true;
-    // const hour = new Date().getHours();
-    // return hour >= CONFIG.OPERATING_START && hour < CONFIG.OPERATING_END;
+    const hour = new Date().getHours();
+    const isActive = hour >= CONFIG.OPERATING_START && hour < CONFIG.OPERATING_END;
+    
+    // Log hanya jika di luar jam operasional (biar tidak spam)
+    if (!isActive && messageQueue.length > 0) {
+        logger.debug(`⏸️ Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)`);
+    }
+    
+    return isActive;
 }
 
 function canSend() {
     resetDaily();
-    if (!isOperatingHours()) return { ok: false, reason: 'Outside operating hours' };
-    if (todayCount >= CONFIG.MAX_PER_DAY) return { ok: false, reason: 'Daily limit reached' };
+    if (!isOperatingHours()) return { ok: false, reason: `Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)` };
+    if (todayCount >= CONFIG.MAX_PER_DAY) return { ok: false, reason: `Daily limit reached (${CONFIG.MAX_PER_DAY}/day)` };
     return { ok: true };
 }
 
@@ -134,7 +147,7 @@ async function processQueue() {
         const check = canSend();
 
         if (!check.ok) {
-            logger.info(`⏸️  Queue paused: ${check.reason}`);
+            logger.info(`⏸️ Queue paused: ${check.reason}`);
             isProcessing = false;
             setTimeout(processQueue, 60000);
             return;
@@ -186,18 +199,52 @@ function queueMessage(phone, message) {
 }
 
 // ═══════════════════════════════════
-// WHATSAPP CONNECTION - HYBRID QR + PAIRING CODE
+// FORCE RESET AUTH
+// ═══════════════════════════════════
+async function forceResetAuth() {
+    try {
+        logger.warn('🗑️ Force resetting auth...');
+        
+        if (sock) {
+            try {
+                await sock.end();
+            } catch (e) {}
+            sock = null;
+        }
+        
+        if (fs.existsSync(CONFIG.AUTH_DIR)) {
+            fs.rmSync(CONFIG.AUTH_DIR, { recursive: true, force: true });
+            logger.info('✅ Auth folder deleted!');
+        }
+        
+        if (state) {
+            state.creds.registered = false;
+        }
+        pairingCodeAttempted = false;
+        
+        logger.info('🔄 Restarting with fresh auth in 3s...');
+        await delay(3000);
+        connectWA();
+        
+    } catch (err) {
+        logger.error('❌ Gagal reset auth:', err.message);
+    }
+}
+
+// ═══════════════════════════════════
+// WHATSAPP CONNECTION
 // ═══════════════════════════════════
 async function connectWA() {
     if (!fs.existsSync(CONFIG.AUTH_DIR)) {
         fs.mkdirSync(CONFIG.AUTH_DIR, { recursive: true });
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_DIR);
+    const { state: authState, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_DIR);
+    state = authState;
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // Matikan QR otomatis, kita handle manual
+        printQRInTerminal: false,
         browser: Browsers.macOS('Desktop'),
         logger: logger.child({ level: 'warn' }),
         markOnlineOnConnect: false,
@@ -206,14 +253,10 @@ async function connectWA() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    let pairingCodeAttempted = false;
-
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ═══════════════════════════════════
-        // HYBRID: QR CODE + PAIRING CODE
-        // ═══════════════════════════════════
+        // ── QR CODE & PAIRING CODE ──
         if (qr && !state.creds.registered && !pairingCodeAttempted) {
             console.log('');
             console.log('╔══════════════════════════════════════════════════╗');
@@ -221,16 +264,13 @@ async function connectWA() {
             console.log('╚══════════════════════════════════════════════════╝');
             console.log('');
 
-            // ── TAMPILKAN QR CODE ──
             console.log('┌──────────────────────────────────────────────────┐');
             console.log('│  📱 OPSI 1: SCAN QR CODE                        │');
             console.log('└──────────────────────────────────────────────────┘');
             console.log('');
             
-            // QR Code ASCII
             qrcode.generate(qr, { small: true });
 
-            // QR Code URL
             const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=' + encodeURIComponent(qr);
             console.log('');
             console.log('🔗 QR URL (Buka di browser):');
@@ -240,15 +280,13 @@ async function connectWA() {
             console.log('   ' + qr);
             console.log('');
 
-            // ── TAMPILKAN PAIRING CODE ──
             console.log('┌──────────────────────────────────────────────────┐');
             console.log('│  🔑 OPSI 2: PAKAI PAIRING CODE                  │');
             console.log('└──────────────────────────────────────────────────┘');
             console.log('');
 
             try {
-                const phoneNumber = CONFIG.PHONE_NUMBER;
-                const code = await sock.requestPairingCode(phoneNumber);
+                const code = await sock.requestPairingCode(CONFIG.PHONE_NUMBER);
                 
                 console.log('╔══════════════════════════════════════════════════╗');
                 console.log('║                                                  ║');
@@ -268,7 +306,7 @@ async function connectWA() {
 
             } catch (error) {
                 console.log('❌ Pairing code error:', error.message);
-                console.log('ℹ️  Pakai QR Code saja untuk login.');
+                console.log('ℹ️ Pakai QR Code saja untuk login.');
                 console.log('');
             }
 
@@ -278,25 +316,44 @@ async function connectWA() {
             console.log('');
         }
 
-        // ── HANDLE CONNECTION ──
+        // ── HANDLE CONNECTION CLOSE ──
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error instanceof Boom)
-                ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-                : true;
+            const error = lastDisconnect?.error;
+            const errorMessage = error?.message || 'Unknown';
+            const statusCode = error?.output?.statusCode;
+            
+            logger.error(`❌ Disconnected: ${errorMessage}`);
 
-            logger.error('❌ Disconnected: ' + (lastDisconnect?.error?.message || 'Unknown'));
+            const shouldForceReset = 
+                errorMessage.includes('Invalid account signature') ||
+                errorMessage.includes('Connection Failure') ||
+                errorMessage.includes('Timed Out') ||
+                errorMessage.includes('connect ECONNREFUSED') ||
+                errorMessage.includes('WebSocket was closed') ||
+                statusCode === DisconnectReason.loggedOut ||
+                statusCode === 401 ||
+                statusCode === 403 ||
+                statusCode === 408 ||
+                statusCode === 440;
+
+            if (shouldForceReset) {
+                logger.error(`🚫 DETECTED: ${errorMessage}`);
+                await forceResetAuth();
+                return;
+            }
+
+            const shouldReconnect = (error instanceof Boom)
+                ? statusCode !== DisconnectReason.loggedOut
+                : true;
 
             if (shouldReconnect) {
                 logger.info('🔄 Reconnecting in 5s...');
                 await delay(5000);
-                pairingCodeAttempted = false;
                 connectWA();
             } else {
-                logger.error('🚫 LOGGED OUT! Delete auth_info folder and restart.');
-                // Reset state agar bisa login ulang
-                state.creds.registered = false;
-                pairingCodeAttempted = false;
+                logger.error('🚫 LOGGED OUT! Silakan restart manual.');
             }
+            
         } else if (connection === 'open') {
             console.log('');
             console.log('╔══════════════════════════════════════════╗');
@@ -307,7 +364,6 @@ async function connectWA() {
             console.log('╚══════════════════════════════════════════╝');
             console.log('');
             
-            // Reset pairing code flag setelah connected
             pairingCodeAttempted = true;
         }
     });
@@ -352,6 +408,10 @@ app.post('/send-bulk', auth, async (req, res) => {
 });
 
 app.get('/status', auth, (req, res) => {
+    const operatingStart = CONFIG.OPERATING_START;
+    const operatingEnd = CONFIG.OPERATING_END;
+    const isActive = isOperatingHours();
+    
     res.json({
         connected: !!sock?.user,
         user: sock?.user?.name || null,
@@ -363,7 +423,9 @@ app.get('/status', auth, (req, res) => {
         remaining: Math.max(0, CONFIG.MAX_PER_DAY - todayCount),
         lastSent: lastSentTime,
         uptime: process.uptime(),
-        operatingHours: '24/7 (disabled)',
+        operatingHours: `${operatingStart}:00 - ${operatingEnd}:00`,
+        isOperatingHours: isActive,
+        baileysVersion: require('./package.json').dependencies['@whiskeysockets/baileys'] || 'unknown',
     });
 });
 
@@ -374,6 +436,32 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: process.uptime()
     });
+});
+
+app.post('/reset-auth', auth, async (req, res) => {
+    try {
+        logger.warn('🗑️ Manual reset auth requested!');
+        await forceResetAuth();
+        res.json({ success: true, message: 'Auth reset, reconnecting...' });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/auth-files', auth, (req, res) => {
+    try {
+        const files = fs.existsSync(CONFIG.AUTH_DIR) 
+            ? fs.readdirSync(CONFIG.AUTH_DIR) 
+            : [];
+        res.json({ 
+            authDir: CONFIG.AUTH_DIR,
+            exists: fs.existsSync(CONFIG.AUTH_DIR),
+            files: files,
+            fileCount: files.length
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // ═══════════════════════════════════
@@ -388,7 +476,7 @@ app.listen(CONFIG.PORT, () => {
     console.log(`   🔑 API Key: ${CONFIG.API_KEY.substring(0, 10)}...`);
     console.log(`   🛡️  Delay: ${CONFIG.MIN_DELAY/1000}-${CONFIG.MAX_DELAY/1000}s`);
     console.log(`   📊 Limit: ${CONFIG.MAX_PER_DAY}/day`);
-    console.log(`   🕐 Hours: 24/7 (DISABLED)`);
+    console.log(`   🕐 Hours: ${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00`);
     console.log(`   📱 Phone: ${CONFIG.PHONE_NUMBER}`);
     console.log('');
     console.log('   🔄 Waiting for WhatsApp connection...');
