@@ -34,13 +34,12 @@ const express = require('express');
 const dotenv = require('dotenv');
 const fs = require('fs');
 
-// Baileys
+// Baileys v7
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     delay,
-    Browsers,
 } = require('@whiskeysockets/baileys');
 
 const { Boom } = require('@hapi/boom');
@@ -118,7 +117,6 @@ function isOperatingHours() {
     const hour = new Date().getHours();
     const isActive = hour >= CONFIG.OPERATING_START && hour < CONFIG.OPERATING_END;
     
-    // Log hanya jika di luar jam operasional (biar tidak spam)
     if (!isActive && messageQueue.length > 0) {
         logger.debug(`⏸️ Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)`);
     }
@@ -232,7 +230,7 @@ async function forceResetAuth() {
 }
 
 // ═══════════════════════════════════
-// WHATSAPP CONNECTION
+// WHATSAPP CONNECTION - V7 COMPATIBLE
 // ═══════════════════════════════════
 async function connectWA() {
     if (!fs.existsSync(CONFIG.AUTH_DIR)) {
@@ -242,13 +240,18 @@ async function connectWA() {
     const { state: authState, saveCreds } = await useMultiFileAuthState(CONFIG.AUTH_DIR);
     state = authState;
 
+    // V7: Browser format berbeda
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: Browsers.macOS('Desktop'),
+        browser: ['Mac OS', 'Desktop', '10.15.7'], // V7 format
         logger: logger.child({ level: 'warn' }),
         markOnlineOnConnect: false,
         syncFullHistory: false,
+        // V7: tambahan config
+        patchMessageBeforeSending: (message) => {
+            return message;
+        },
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -286,6 +289,7 @@ async function connectWA() {
             console.log('');
 
             try {
+                // V7: requestPairingCode mungkin berbeda
                 const code = await sock.requestPairingCode(CONFIG.PHONE_NUMBER);
                 
                 console.log('╔══════════════════════════════════════════════════╗');
@@ -470,7 +474,7 @@ app.get('/auth-files', auth, (req, res) => {
 app.listen(CONFIG.PORT, () => {
     console.log('');
     console.log('╔══════════════════════════════════════════╗');
-    console.log('║   GoMad WhatsApp Service (Baileys)       ║');
+    console.log('║   GoMad WhatsApp Service (Baileys v7)    ║');
     console.log('╚══════════════════════════════════════════╝');
     console.log(`   🚀 Port: ${CONFIG.PORT}`);
     console.log(`   🔑 API Key: ${CONFIG.API_KEY.substring(0, 10)}...`);
