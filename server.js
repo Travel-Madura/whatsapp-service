@@ -42,11 +42,22 @@ const {
     delay,
 } = require('@whiskeysockets/baileys');
 
-const { Boom } = require('@hapi/boom');
+// Note: @hapi/boom is a transitive dependency of baileys.
+// We avoid direct import for stability; use statusCode checks instead.
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 
 dotenv.config();
+
+// Validate required env vars
+if (!process.env.API_KEY) {
+    console.error('❌ ERROR: API_KEY is required in .env');
+    process.exit(1);
+}
+if (!process.env.PHONE_NUMBER) {
+    console.error('❌ ERROR: PHONE_NUMBER is required in .env');
+    process.exit(1);
+}
 
 const app = express();
 app.use(express.json());
@@ -56,9 +67,9 @@ app.use(express.json());
 // ═══════════════════════════════════
 const CONFIG = {
     PORT: process.env.PORT || 3001,
-    API_KEY: process.env.API_KEY || 'gomad-baileys-secret-key-2024',
+    API_KEY: process.env.API_KEY,
     AUTH_DIR: process.env.AUTH_DIR || './auth_info',
-    PHONE_NUMBER: process.env.PHONE_NUMBER || '6285138094643',
+    PHONE_NUMBER: process.env.PHONE_NUMBER,
 
     // Anti-Banned Settings
     MIN_DELAY: parseInt(process.env.MIN_DELAY) || 15000,
@@ -93,12 +104,33 @@ const logger = pino({
 const messageQueue = [];
 let isProcessing = false;
 let todayCount = 0;
+let hourlyCount = 0;
 let todayDate = new Date().toDateString();
+let currentHour = new Date().getHours();
 let totalSent = 0;
 let lastSentTime = null;
 let sock = null;
 let state = null;
 let pairingCodeAttempted = false;
+let lastResetTime = 0; // cooldown untuk reset-auth
+
+// Simple rate limiter
+const rateLimitStore = new Map();
+function rateLimit(ip, limit = 30, windowMs = 60000) {
+    const now = Date.now();
+    const entry = rateLimitStore.get(ip) || { count: 0, resetAt: now + windowMs };
+    if (now > entry.resetAt) { entry.count = 0; entry.resetAt = now + windowMs; }
+    entry.count++;
+    rateLimitStore.set(ip, entry);
+    return entry.count <= limit;
+}
+// Cleanup rate limit store setiap 5 menit
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, entry] of rateLimitStore) {
+        if (now > entry.resetAt) rateLimitStore.delete(ip);
+    }
+}, 300000);
 
 function resetDaily() {
     const today = new Date().toDateString();
@@ -107,6 +139,19 @@ function resetDaily() {
         todayDate = today;
         todayCount = 0;
     }
+    const hour = new Date().getHours();
+    if (hour !== currentHour) {
+        currentHour = hour;
+        hourlyCount = 0;
+    }
+}
+
+function canSend() {
+    resetDaily();
+    if (!isOperatingHours()) return { ok: false, reason: `Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)` };
+    if (hourlyCount >= CONFIG.MAX_PER_HOUR) return { ok: false, reason: `Hourly limit reached (${CONFIG.MAX_PER_HOUR}/hour)` };
+    if (todayCount >= CONFIG.MAX_PER_DAY) return { ok: false, reason: `Daily limit reached (${CONFIG.MAX_PER_DAY}/day)` };
+    return { ok: true };
 }
 
 function randomDelay() {
@@ -122,13 +167,6 @@ function isOperatingHours() {
     }
     
     return isActive;
-}
-
-function canSend() {
-    resetDaily();
-    if (!isOperatingHours()) return { ok: false, reason: `Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)` };
-    if (todayCount >= CONFIG.MAX_PER_DAY) return { ok: false, reason: `Daily limit reached (${CONFIG.MAX_PER_DAY}/day)` };
-    return { ok: true };
 }
 
 async function processQueue() {
@@ -160,6 +198,7 @@ async function processQueue() {
             const result = await sock.sendMessage(jid, { text: message });
 
             todayCount++;
+            hourlyCount++;
             totalSent++;
             lastSentTime = new Date();
 
@@ -328,29 +367,37 @@ async function connectWA() {
             
             logger.error(`❌ Disconnected: ${errorMessage}`);
 
+            // Hanya force reset untuk auth-related errors
             const shouldForceReset = 
                 errorMessage.includes('Invalid account signature') ||
+                statusCode === DisconnectReason.loggedOut ||
+                statusCode === 401 ||
+                statusCode === 403;
+
+            // Network errors: retry reconnect (jangan hapus auth!)
+            const isNetworkError = 
                 errorMessage.includes('Connection Failure') ||
                 errorMessage.includes('Timed Out') ||
                 errorMessage.includes('connect ECONNREFUSED') ||
                 errorMessage.includes('WebSocket was closed') ||
-                statusCode === DisconnectReason.loggedOut ||
-                statusCode === 401 ||
-                statusCode === 403 ||
                 statusCode === 408 ||
                 statusCode === 440;
 
             if (shouldForceReset) {
-                logger.error(`🚫 DETECTED: ${errorMessage}`);
+                logger.error(`🚫 AUTH ERROR DETECTED: ${errorMessage}`);
                 await forceResetAuth();
                 return;
             }
 
-            const shouldReconnect = (error instanceof Boom)
-                ? statusCode !== DisconnectReason.loggedOut
-                : true;
+            if (isNetworkError) {
+                logger.info(`🌐 Network error, reconnecting in 10s (preserving auth)...`);
+                await delay(10000);
+                connectWA();
+                return;
+            }
 
-            if (shouldReconnect) {
+            // Default: coba reconnect
+            if (statusCode !== DisconnectReason.loggedOut) {
                 logger.info('🔄 Reconnecting in 5s...');
                 await delay(5000);
                 connectWA();
@@ -385,6 +432,15 @@ function auth(req, res, next) {
     }
     next();
 }
+
+// Global rate limiting middleware
+app.use((req, res, next) => {
+    const ip = req.ip || req.connection.remoteAddress;
+    if (!rateLimit(ip, 60, 60000)) {
+        return res.status(429).json({ error: 'Too many requests, slow down!' });
+    }
+    next();
+});
 
 app.post('/send', auth, async (req, res) => {
     const { phone, message } = req.body;
@@ -422,6 +478,8 @@ app.get('/status', auth, (req, res) => {
         number: sock?.user?.id || null,
         queue: messageQueue.length,
         today: todayCount,
+        hourly: hourlyCount,
+        hourlyLimit: CONFIG.MAX_PER_HOUR,
         total: totalSent,
         limit: CONFIG.MAX_PER_DAY,
         remaining: Math.max(0, CONFIG.MAX_PER_DAY - todayCount),
@@ -437,13 +495,22 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         connected: !!sock?.user, 
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime()
+        timestamp: new Date().toISOString()
     });
 });
 
 app.post('/reset-auth', auth, async (req, res) => {
+    const now = Date.now();
+    const cooldownMs = 300000; // 5 menit cooldown
+    if (now - lastResetTime < cooldownMs) {
+        const remaining = Math.ceil((cooldownMs - (now - lastResetTime)) / 1000);
+        return res.status(429).json({ 
+            error: `Reset auth cooldown active. Try again in ${remaining}s`,
+            cooldownRemaining: remaining
+        });
+    }
     try {
+        lastResetTime = now;
         logger.warn('🗑️ Manual reset auth requested!');
         await forceResetAuth();
         res.json({ success: true, message: 'Auth reset, reconnecting...' });
@@ -479,7 +546,7 @@ app.listen(CONFIG.PORT, () => {
     console.log(`   🚀 Port: ${CONFIG.PORT}`);
     console.log(`   🔑 API Key: ${CONFIG.API_KEY.substring(0, 10)}...`);
     console.log(`   🛡️  Delay: ${CONFIG.MIN_DELAY/1000}-${CONFIG.MAX_DELAY/1000}s`);
-    console.log(`   📊 Limit: ${CONFIG.MAX_PER_DAY}/day`);
+    console.log(`   📊 Limit: ${CONFIG.MAX_PER_HOUR}/hour, ${CONFIG.MAX_PER_DAY}/day`);
     console.log(`   🕐 Hours: ${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00`);
     console.log(`   📱 Phone: ${CONFIG.PHONE_NUMBER}`);
     console.log('');
