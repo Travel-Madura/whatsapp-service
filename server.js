@@ -90,12 +90,23 @@ const CONFIG = {
 // ═══════════════════════════════════
 // LOGGER
 // ═══════════════════════════════════
+// Pretty log hanya saat terminal interaktif (lokal).
+// Di cloud (Heroku/Render) pakai JSON biasa supaya stabil & hemat baris log.
+const isTTY = !!process.stdout.isTTY;
 const logger = pino({
-    transport: {
-        target: 'pino-pretty',
-        options: { colorize: true }
-    },
     level: CONFIG.LOG_LEVEL,
+    ...(isTTY ? { transport: { target: 'pino-pretty', options: { colorize: true } } } : {}),
+});
+
+// ─────────────────────────────────────────────
+// GUARD: error dari koneksi WhatsApp JANGAN boleh mematikan HTTP server.
+// Tanpa ini, satu promise rejection bisa bikin crash → restart loop di Heroku/Render.
+// ─────────────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
+    logger.error({ err: reason }, '⚠️ Unhandled promise rejection (server tetap jalan)');
+});
+process.on('uncaughtException', (err) => {
+    logger.error({ err }, '⚠️ Uncaught exception (server tetap jalan)');
 });
 
 // ═══════════════════════════════════
@@ -283,14 +294,11 @@ async function connectWA() {
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ['Chrome (Linux)', '', ''], // UBAH: pakai Chrome biar lebih aman
-        logger: logger.child({ level: 'warn' }),
-        markOnlineOnConnect: false,
-        syncFullHistory: false,
-        // V7: tambahan config
-        patchMessageBeforeSending: (message) => {
-            return message;
-        },
+        browser: ['Chrome (Linux)', '', ''], // pakai Chrome biar lebih aman
+        // Redam log internal Baileys → cukup level error supaya log tidak kebanjiran
+        logger: logger.child({ level: 'error' }),
+        // NOTE: opsi khusus v7 (markOnlineOnConnect, syncFullHistory,
+        // patchMessageBeforeSending) dihapus agar kompatibel Baileys 6.x stabil.
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -590,4 +598,8 @@ app.listen(CONFIG.PORT, () => {
     console.log('');
 });
 
-connectWA();
+// Start WhatsApp connection — error di sini jangan sampai mematikan proses.
+connectWA().catch((err) => {
+    logger.error({ err }, '❌ connectWA gagal, coba lagi dalam 5 detik');
+    setTimeout(connectWA, 5000);
+});
