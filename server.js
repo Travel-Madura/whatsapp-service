@@ -76,14 +76,14 @@ const CONFIG = {
     MAX_DELAY: parseInt(process.env.MAX_DELAY) || 35000,
     MAX_PER_HOUR: parseInt(process.env.MAX_PER_HOUR) || 10,
     MAX_PER_DAY: parseInt(process.env.MAX_PER_DAY) || 50,
-    
+
     // Jam Operasional (default 24 jam)
     OPERATING_START: parseInt(process.env.OPERATING_START) || 0,
     OPERATING_END: parseInt(process.env.OPERATING_END) || 24,
-    
+
     RETRY_DELAY: parseInt(process.env.RETRY_DELAY) || 60000,
     MAX_RETRIES: parseInt(process.env.MAX_RETRIES) || 3,
-    
+
     LOG_LEVEL: process.env.LOG_LEVEL || 'info',
 };
 
@@ -161,11 +161,11 @@ function randomDelay() {
 function isOperatingHours() {
     const hour = new Date().getHours();
     const isActive = hour >= CONFIG.OPERATING_START && hour < CONFIG.OPERATING_END;
-    
+
     if (!isActive && messageQueue.length > 0) {
         logger.debug(`⏸️ Outside operating hours (${CONFIG.OPERATING_START}:00-${CONFIG.OPERATING_END}:00)`);
     }
-    
+
     return isActive;
 }
 
@@ -241,28 +241,28 @@ function queueMessage(phone, message) {
 async function forceResetAuth() {
     try {
         logger.warn('🗑️ Force resetting auth...');
-        
+
         if (sock) {
             try {
                 await sock.end();
             } catch (e) {}
             sock = null;
         }
-        
+
         if (fs.existsSync(CONFIG.AUTH_DIR)) {
             fs.rmSync(CONFIG.AUTH_DIR, { recursive: true, force: true });
             logger.info('✅ Auth folder deleted!');
         }
-        
+
         if (state) {
             state.creds.registered = false;
         }
         pairingCodeAttempted = false;
-        
+
         logger.info('🔄 Restarting with fresh auth in 3s...');
         await delay(3000);
         connectWA();
-        
+
     } catch (err) {
         logger.error('❌ Gagal reset auth:', err.message);
     }
@@ -283,7 +283,7 @@ async function connectWA() {
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ["Chrome (Linux)", "", ""],
+        browser: ['Chrome (Linux)', '', ''], // UBAH: pakai Chrome biar lebih aman
         logger: logger.child({ level: 'warn' }),
         markOnlineOnConnect: false,
         syncFullHistory: false,
@@ -310,7 +310,7 @@ async function connectWA() {
             console.log('│  📱 OPSI 1: SCAN QR CODE                        │');
             console.log('└──────────────────────────────────────────────────┘');
             console.log('');
-            
+
             qrcode.generate(qr, { small: true });
 
             const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=' + encodeURIComponent(qr);
@@ -330,7 +330,7 @@ async function connectWA() {
             try {
                 // V7: requestPairingCode mungkin berbeda
                 const code = await sock.requestPairingCode(CONFIG.PHONE_NUMBER);
-                
+
                 console.log('╔══════════════════════════════════════════════════╗');
                 console.log('║                                                  ║');
                 console.log(`║   🔑 PAIRING CODE: ${code}                           ║`);
@@ -364,18 +364,18 @@ async function connectWA() {
             const error = lastDisconnect?.error;
             const errorMessage = error?.message || 'Unknown';
             const statusCode = error?.output?.statusCode;
-            
+
             logger.error(`❌ Disconnected: ${errorMessage}`);
 
             // Hanya force reset untuk auth-related errors
-            const shouldForceReset = 
+            const shouldForceReset =
                 errorMessage.includes('Invalid account signature') ||
                 statusCode === DisconnectReason.loggedOut ||
                 statusCode === 401 ||
                 statusCode === 403;
 
             // Network errors: retry reconnect (jangan hapus auth!)
-            const isNetworkError = 
+            const isNetworkError =
                 errorMessage.includes('Connection Failure') ||
                 errorMessage.includes('Timed Out') ||
                 errorMessage.includes('connect ECONNREFUSED') ||
@@ -404,7 +404,7 @@ async function connectWA() {
             } else {
                 logger.error('🚫 LOGGED OUT! Silakan restart manual.');
             }
-            
+
         } else if (connection === 'open') {
             console.log('');
             console.log('╔══════════════════════════════════════════╗');
@@ -414,7 +414,7 @@ async function connectWA() {
             console.log('║   Ready to send messages!               ║');
             console.log('╚══════════════════════════════════════════╝');
             console.log('');
-            
+
             pairingCodeAttempted = true;
         }
     });
@@ -471,7 +471,7 @@ app.get('/status', auth, (req, res) => {
     const operatingStart = CONFIG.OPERATING_START;
     const operatingEnd = CONFIG.OPERATING_END;
     const isActive = isOperatingHours();
-    
+
     res.json({
         connected: !!sock?.user,
         user: sock?.user?.name || null,
@@ -492,9 +492,9 @@ app.get('/status', auth, (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
-        connected: !!sock?.user, 
+    res.json({
+        status: 'ok',
+        connected: !!sock?.user,
         timestamp: new Date().toISOString()
     });
 });
@@ -504,7 +504,7 @@ app.post('/reset-auth', auth, async (req, res) => {
     const cooldownMs = 300000; // 5 menit cooldown
     if (now - lastResetTime < cooldownMs) {
         const remaining = Math.ceil((cooldownMs - (now - lastResetTime)) / 1000);
-        return res.status(429).json({ 
+        return res.status(429).json({
             error: `Reset auth cooldown active. Try again in ${remaining}s`,
             cooldownRemaining: remaining
         });
@@ -521,10 +521,10 @@ app.post('/reset-auth', auth, async (req, res) => {
 
 app.get('/auth-files', auth, (req, res) => {
     try {
-        const files = fs.existsSync(CONFIG.AUTH_DIR) 
-            ? fs.readdirSync(CONFIG.AUTH_DIR) 
+        const files = fs.existsSync(CONFIG.AUTH_DIR)
+            ? fs.readdirSync(CONFIG.AUTH_DIR)
             : [];
-        res.json({ 
+        res.json({
             authDir: CONFIG.AUTH_DIR,
             exists: fs.existsSync(CONFIG.AUTH_DIR),
             files: files,
@@ -532,6 +532,42 @@ app.get('/auth-files', auth, (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// ═══════════════════════════════════
+// 🔑 ENDPOINT: GET PAIRING CODE MANUAL (BARU!)
+// ═══════════════════════════════════
+app.get('/pairing', auth, async (req, res) => {
+    if (!sock) {
+        return res.status(503).json({ 
+            success: false, 
+            error: 'WhatsApp not connected yet. Please wait a moment and try again.' 
+        });
+    }
+    
+    try {
+        logger.info('🔑 Manual pairing code requested...');
+        const code = await sock.requestPairingCode(CONFIG.PHONE_NUMBER);
+        
+        console.log('');
+        console.log('╔══════════════════════════════════════════╗');
+        console.log(`║   🔑 PAIRING CODE (MANUAL): ${code}      ║`);
+        console.log('╚══════════════════════════════════════════╝');
+        console.log('');
+        
+        res.json({ 
+            success: true, 
+            phone: CONFIG.PHONE_NUMBER,
+            pairingCode: code,
+            message: 'Enter this code in WhatsApp → Settings → Linked Devices → Link a Device'
+        });
+    } catch (error) {
+        logger.error('❌ Pairing code error:', error.message);
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
