@@ -283,7 +283,7 @@ async function connectWA() {
     sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
-        browser: ['Mac OS', 'Desktop', '10.15.7'], // V7 format
+        browser: ["Chrome (Linux)", "", ""],
         logger: logger.child({ level: 'warn' }),
         markOnlineOnConnect: false,
         syncFullHistory: false,
